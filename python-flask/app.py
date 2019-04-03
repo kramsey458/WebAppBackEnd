@@ -1,20 +1,14 @@
-import os, sys, csv, json
+import os, sys, csv, json, logging
 import pandas as pd
 import modules.schemas.user as validate
 from flask import jsonify, request, make_response, send_from_directory, redirect, url_for
 from flask_jwt_extended import (create_access_token, create_refresh_token,
                                 jwt_required, jwt_refresh_token_required, get_jwt_identity)
-from modules.app.config import app, mongo, flask_bcrypt, jwt
-from modules.utils.allowedFilenames import allowed_file
+from modules.app.config import app, mongo, flask_bcrypt, jwt, init_config_details
+from modules.utils.allowed_filenames import allowed_file
+from modules.utils.init_classifier import classify_data
 from werkzeug.utils import secure_filename
-
-lib_path = os.path.abspath(os.path.join('python-flask'))
-sys.path.append(lib_path)
-ROOT_PATH = os.path.dirname(os.path.realpath(__file__))
-os.environ.update({'ROOT_PATH': ROOT_PATH})
-# Port variable to run the server on.
-PORT = os.environ.get('PORT')
-sys.path.remove(lib_path)
+from bson import json_util
 
 
 @app.errorhandler(404)
@@ -55,7 +49,6 @@ def register():
         user = data['data']
         user['password'] = flask_bcrypt.generate_password_hash(
             user['password'])
-
         user_exists = mongo.db.users.find_one({'email': user['email']}) != None
         if (user_exists):
             return jsonify({'ok': 'False', 'message': 'Email already exists!'}), 401
@@ -105,33 +98,55 @@ def unauthorized_response(callback):
     }), 401
 
 
-@app.route('/upload', methods=['GET', 'POST'])
-def upload_file():
+@app.route('/category/get', methods=['GET'])
+def get_category():
+    if request.method == 'GET':
+        data = request.values.get('category_name')
+        result = mongo.db.categories.find_one({'category_name': data})
+        return jsonify({'ok': True, 'categories': ([
+        {'label': 'Review', 'value': ['author', 'comment', 'date']},
+        {'label': 'Employee', 'value': ['fullname', 'occupation', 'address', 'id']}
+     ])})
+
+
+@app.route('/category/remove', methods=['POST'])
+def remove_category():
+    data = request.get_json()
+    category = data['category_name']
+    result = mongo.db.categories.delete_one(({'category_name': category}))
+    if result.deleted_count == 0:
+        return jsonify({'ok': False, 'message': 'Category not found'}), 401
+    else:
+        return jsonify({'ok': True}), 200
+
+
+@app.route('/upload', methods=['POST'])
+def classify_file():
     if request.method == 'POST':
-        # check if the post request has the file part
-        if 'file' not in request.files:
-            return redirect(request.url)
-        file = request.files['file']
-        # if user does not select file, browser also
-        # submit a empty part without filename
-        if file.filename == '':
-            return jsonify({'ok': False}), 404
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-            df = pd.read_csv((os.path.join(app.config['UPLOAD_FOLDER'], filename)),
-                             encoding='ISO-8859-1')  # loading csv file
-            df.to_json((os.path.join(app.config['UPLOAD_FOLDER'], filename + '.json')))  # saving to json file
-            jdf = open((os.path.join(app.config['UPLOAD_FOLDER'], filename + '.json'))).read()  # loading the json file
-            mongo.db.datasets.insert_one(jdf)
-            # data = json.loads(jdf)  # reading json file
-            # return redirect(url_for('uploaded_file',filename=filename))
-            return jsonify({'ok': True}), 200
-    return jsonify({'ok': False}), 404
+        files = request.files.getlist('file')
+        category = (request.values.get('category'))
+        properties = (request.values.get('properties'))
+        filenames = []
+        for file in files:
+            if allowed_file(file.filename):
+                filename = secure_filename(file.filename)
+                file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+                file_path = (os.path.join(app.config['UPLOAD_FOLDER'], filename))
+                filenames.append(file_path)
+            else:
+                return jsonify({'ok': False}), 404
+        data = (json_util.dumps(category))
+        mongo.db.categories.insert_one(({'category_name': data}))
+        classify_data(category, properties, filenames)
+        return jsonify({'ok': True}), 200
+    else:
+        return jsonify({'ok': False}), 404
 
 
 if __name__ == '__main__':
-    app.config['DEBUG'] # = os.environ.get('ENV') == 'development'  # Debug mode if development env
+    init_config_details()
+    # app.config['DEBUG'] = os.environ.get('ENV') == 'development'  # Debug mode if development env
     port = int(os.environ.get('PORT', 33507))
     host = os.environ.get('HOST', '0.0.0.0')
+    logging.basicConfig(filename='error.log', level=logging.DEBUG)
     app.run(host=host, port=port)  # Run the app
